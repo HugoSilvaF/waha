@@ -229,83 +229,145 @@ export class MessageHandler {
     return msg;
   }
 
-  private async sendFile(
-    chatId: string,
-    content: string,
-    replyTo: string,
-    mentions: string[] | null,
-    file: MessageAttachment,
-  ) {
-    const url = file.data_url;
-    let filename = url.split('/').pop();
-    if (filename) {
-      filename = decodeURIComponent(filename);
-    }
-    const mimetype = mime.lookup(filename);
-    const session = this.session;
+private normalizeMime(value?: string | false): string {
+  if (!value) {
+    return 'application/octet-stream';
+  }
 
-    switch (file.file_type) {
-      case 'image':
-        if (mimetype != 'image/jpeg' && mimetype != 'image/png') {
-          // Send it as a file
-          break;
-        }
-        const imageRequest: MessageImageRequest = {
-          session: '',
-          caption: content,
-          chatId: chatId,
-          reply_to: replyTo,
-          file: {
-            url: url,
-            mimetype: mimetype,
-          },
-          mentions: mentions,
-        };
-        return session.sendImage(imageRequest);
-      case 'video':
-        if (mimetype != 'video/mp4') {
-          break;
-        }
-        const videoRequest: MessageVideoRequest = {
-          session: '',
-          caption: content,
-          chatId: chatId,
-          reply_to: replyTo,
-          file: {
-            url: url,
-            mimetype: mimetype,
-            filename: filename,
-          },
-          convert: true,
-          mentions: mentions,
-        };
-        return session.sendVideo(videoRequest);
-      case 'audio':
-        const voiceRequest: MessageVoiceRequest = {
-          session: '',
-          chatId: chatId,
-          file: {
-            url: url,
-            mimetype: mimetype,
-            filename: filename,
-          },
-          convert: true,
-        };
-        return session.sendVoice(voiceRequest);
-    }
-    // Fallback and send as file (attachment)
-    const fileRequest: MessageFileRequest = {
+  return String(value);
+}
+
+private isImageMime(mimetype: string): boolean {
+  return [
+    'image/jpeg',
+    'image/jpg',
+    'image/png',
+    'image/webp',
+  ].includes(mimetype);
+}
+
+private isVideoMime(mimetype: string): boolean {
+  return [
+    'video/mp4',
+    'video/3gpp',
+    'video/quicktime',
+    'video/webm',
+  ].includes(mimetype);
+}
+
+private isVoiceLikeMime(mimetype: string): boolean {
+  return [
+    'audio/ogg',
+    'audio/opus',
+    'audio/mpeg',
+    'audio/mp3',
+    'audio/mp4',
+    'audio/aac',
+    'audio/amr',
+    'audio/wav',
+    'audio/x-wav',
+  ].includes(mimetype);
+}
+
+private async sendFile(
+  chatId: string,
+  content: string,
+  replyTo: string,
+  mentions: string[] | null,
+  file: MessageAttachment,
+) {
+  const url = file.data_url;
+  let filename = url.split('/').pop();
+
+  if (filename) {
+    filename = decodeURIComponent(filename.split('?')[0]);
+  }
+
+  filename = filename || 'file';
+
+  const mimetype = this.normalizeMime(mime.lookup(filename));
+  const session = this.session;
+
+  if (file.file_type === 'image' && this.isImageMime(mimetype)) {
+    const imageRequest: MessageImageRequest = {
       session: '',
       caption: content,
-      chatId: chatId,
+      chatId,
       reply_to: replyTo,
       file: {
-        filename: filename,
-        url: url,
-        mimetype: mimetype,
+        url,
+        mimetype,
+        filename,
       },
-      mentions: mentions,
+      mentions,
     };
-    return session.sendFile(fileRequest);
+
+    return session.sendImage(imageRequest);
   }
+
+  if (file.file_type === 'video' && this.isVideoMime(mimetype)) {
+    const videoRequest: MessageVideoRequest = {
+      session: '',
+      caption: content,
+      chatId,
+      reply_to: replyTo,
+      file: {
+        url,
+        mimetype,
+        filename,
+      },
+      convert: true,
+      mentions,
+    };
+
+    return session.sendVideo(videoRequest);
+  }
+
+  if (file.file_type === 'audio') {
+    if (this.isVoiceLikeMime(mimetype)) {
+      const voiceRequest: MessageVoiceRequest = {
+        session: '',
+        chatId,
+        file: {
+          url,
+          mimetype,
+          filename,
+        },
+        convert: true,
+      };
+
+      return session.sendVoice(voiceRequest);
+    }
+
+    const audioAsFileRequest: MessageFileRequest = {
+      session: '',
+      caption: content,
+      chatId,
+      reply_to: replyTo,
+      file: {
+        filename,
+        url,
+        mimetype,
+      },
+      mentions,
+    };
+
+    return session.sendFile(audioAsFileRequest);
+  }
+
+  const fileRequest: MessageFileRequest = {
+    session: '',
+    caption: content,
+    chatId,
+    reply_to: replyTo,
+    file: {
+      filename,
+      url,
+      mimetype,
+    },
+    mentions,
+  };
+
+  return session.sendFile(fileRequest);
+}
 }

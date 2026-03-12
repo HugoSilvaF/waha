@@ -3,6 +3,7 @@ import {
   proto,
   WAMessageKey,
 } from '@adiwajshing/baileys';
+import mime from 'mime-types';
 import * as grpc from '@grpc/grpc-js';
 import { connectivityState } from '@grpc/grpc-js';
 import { UnprocessableEntityException } from '@nestjs/common';
@@ -87,6 +88,7 @@ import {
   MessageReactionRequest,
   MessageReplyRequest,
   MessageTextRequest,
+  MessageVideoRequest,
   MessageVoiceRequest,
   SendSeenRequest,
   WANumberExistResult,
@@ -272,6 +274,7 @@ export class WhatsappSessionGoWSCore extends WhatsappSession {
     });
   }
 
+
   async start() {
     this.status = WAHASessionStatus.STARTING;
     this.buildStreams();
@@ -280,6 +283,7 @@ export class WhatsappSessionGoWSCore extends WhatsappSession {
     if (this.isDebugEnabled()) {
       this.listenEngineEventsInDebugMode();
     }
+
 
     // start session
     const auth = await this.authFactory.buildAuth(this.sessionStore, this.name);
@@ -320,6 +324,171 @@ export class WhatsappSessionGoWSCore extends WhatsappSession {
       throw err;
     });
   }
+
+private inferMimeType(filename?: string, fallback?: string): string {
+  if (fallback) {
+    return fallback;
+  }
+
+  if (!filename) {
+    return 'application/octet-stream';
+  }
+
+  const detected = mime.lookup(filename);
+  return detected ? String(detected) : 'application/octet-stream';
+}
+
+private inferFilenameFromUrl(url?: string, fallback = 'file'): string {
+  if (!url) {
+    return fallback;
+  }
+
+  try {
+    const clean = url.split('?')[0];
+    const last = clean.split('/').pop();
+    if (!last) {
+      return fallback;
+    }
+    return decodeURIComponent(last);
+  } catch {
+    return fallback;
+  }
+}
+
+private decodeBase64Payload(data: string): Uint8Array {
+  const base64 = data.includes(',') ? data.split(',').pop() : data;
+  return new Uint8Array(Buffer.from(base64 || '', 'base64'));
+}
+
+private async resolveMediaInput(file: {
+  url?: string;
+  mimetype?: string;
+  filename?: string;
+  data?: string;
+  content?: Uint8Array;
+  contentPath?: string;
+}) {
+  if (!file) {
+    throw new UnprocessableEntityException('File payload is required');
+  }
+
+  if (file.contentPath) {
+    const filename = file.filename || path.basename(file.contentPath);
+    const mimetype = this.inferMimeType(filename, file.mimetype);
+
+    return {
+      content: new Uint8Array(),
+      contentPath: file.contentPath,
+      filename,
+      mimetype,
+    };
+  }
+
+  if (file.content && file.content.length > 0) {
+    const filename = file.filename || 'file';
+    const mimetype = this.inferMimeType(filename, file.mimetype);
+
+    return {
+      content: file.content,
+      contentPath: '',
+      filename,
+      mimetype,
+    };
+  }
+
+  if (file.data) {
+    const filename = file.filename || 'file';
+    const mimetype = this.inferMimeType(filename, file.mimetype);
+
+    return {
+      content: this.decodeBase64Payload(file.data),
+      contentPath: '',
+      filename,
+      mimetype,
+    };
+  }
+
+  if (file.url) {
+    const buffer = await this.fetch(file.url);
+    const filename = file.filename || this.inferFilenameFromUrl(file.url, 'file');
+    const mimetype = this.inferMimeType(filename, file.mimetype);
+
+    return {
+      content: new Uint8Array(buffer),
+      contentPath: '',
+      filename,
+      mimetype,
+    };
+  }
+
+  throw new UnprocessableEntityException(
+    'File payload must contain one of: url, data, content, or contentPath',
+  );
+}
+
+private buildMediaPayload(params: {
+  type: any;
+  content: Uint8Array;
+  mimetype: string;
+  filename?: string;
+  contentPath?: string;
+  duration?: number;
+  waveform?: Uint8Array;
+}) {
+  const media = new messages.Media({
+    type: params.type,
+    mimetype: params.mimetype,
+    filename: params.filename || '',
+    contentPath: params.contentPath || '',
+  });
+
+  if (params.contentPath) {
+    media.contentPath = params.contentPath;
+  } else {
+    media.content = params.content;
+  }
+
+  if (params.type === messages.MediaType.AUDIO) {
+    media.audio = new messages.AudioInfo({
+      duration: params.duration || 0,
+      waveform: params.waveform || new Uint8Array(),
+    });
+  }
+
+  if (
+    params.type === messages.MediaType.VIDEO ||
+    params.type === messages.MediaType.PTV
+  ) {
+    media.video = new messages.VideoInfo({
+      duration: params.duration || 0,
+    });
+  }
+
+  return media;
+}
+
+private async sendMediaMessage(params: {
+  chatId: string;
+  replyTo?: string;
+  mentions?: string[];
+  text?: string;
+  media: any;
+}) {
+  const jid = toJID(this.ensureSuffix(params.chatId));
+
+  const message = new messages.MessageRequest({
+    session: this.session,
+    jid,
+    text: params.text || '',
+    replyTo: getMessageIdFromSerialized(params.replyTo),
+    mentions: params.mentions?.map((mention) => toJID(mention)) || [],
+    media: params.media,
+  });
+
+  const response = await promisify(this.client.SendMessage)(message);
+  const data = response.toObject();
+  return this.messageResponse(jid, data);
+}
 
   protected getProxyUrl(config: ProxyConfig): string {
     if (!config || !config.server) {
@@ -782,6 +951,8 @@ export class WhatsappSessionGoWSCore extends WhatsappSession {
     this.events2.get(WAHAEvents.LABEL_CHAT_DELETED).switch(labelChatDeleted$);
   }
 
+
+
   @Activity()
   async fetchContactProfilePicture(id: string): Promise<string> {
     const jid = toJID(this.ensureSuffix(id));
@@ -1120,17 +1291,88 @@ export class WhatsappSessionGoWSCore extends WhatsappSession {
     throw new NotImplementedByEngineError();
   }
 
-  sendImage(request: MessageImageRequest) {
-    throw new AvailableInPlusVersion();
-  }
+@Activity()
+async sendImage(request: MessageImageRequest) {
+  const file = await this.resolveMediaInput(request.file);
 
-  sendFile(request: MessageFileRequest) {
-    throw new AvailableInPlusVersion();
-  }
+  const media = this.buildMediaPayload({
+    type: messages.MediaType.IMAGE,
+    content: file.content,
+    contentPath: file.contentPath,
+    mimetype: file.mimetype,
+    filename: file.filename,
+  });
 
-  sendVoice(request: MessageVoiceRequest) {
-    throw new AvailableInPlusVersion();
-  }
+  return this.sendMediaMessage({
+    chatId: request.chatId,
+    replyTo: request.reply_to,
+    mentions: request.mentions,
+    text: request.caption || '',
+    media,
+  });
+}
+
+@Activity()
+async sendVideo(request: MessageVideoRequest) {
+  const file = await this.resolveMediaInput(request.file);
+
+  const media = this.buildMediaPayload({
+    type: messages.MediaType.VIDEO,
+    content: file.content,
+    contentPath: file.contentPath,
+    mimetype: file.mimetype,
+    filename: file.filename,
+    duration: 0,
+  });
+
+  return this.sendMediaMessage({
+    chatId: request.chatId,
+    replyTo: request.reply_to,
+    mentions: request.mentions,
+    text: request.caption || '',
+    media,
+  });
+}
+@Activity()
+async sendFile(request: MessageFileRequest) {
+  const file = await this.resolveMediaInput(request.file);
+
+  const media = this.buildMediaPayload({
+    type: messages.MediaType.DOCUMENT,
+    content: file.content,
+    contentPath: file.contentPath,
+    mimetype: file.mimetype,
+    filename: file.filename,
+  });
+
+  return this.sendMediaMessage({
+    chatId: request.chatId,
+    replyTo: request.reply_to,
+    mentions: request.mentions,
+    text: request.caption || '',
+    media,
+  });
+}
+
+@Activity()
+async sendVoice(request: MessageVoiceRequest) {
+  const file = await this.resolveMediaInput(request.file);
+
+  const media = this.buildMediaPayload({
+    type: messages.MediaType.AUDIO,
+    content: file.content,
+    contentPath: file.contentPath,
+    mimetype: file.mimetype,
+    filename: file.filename,
+    duration: 0,
+  });
+
+  return this.sendMediaMessage({
+    chatId: request.chatId,
+    replyTo: request.reply_to,
+    media,
+  });
+}
 
   sendLinkCustomPreview(
     request: MessageLinkCustomPreviewRequest,
