@@ -4,7 +4,7 @@
   <img src="./logo.png" style='border-radius: 50%' width='150'/>
 </p>
 
-**WAHA** - **W**hats**A**pp **H**TTP **A**PI (REST API) that you can install on your own server and run in less than 5 minutes!
+**WAHA Fork** — a self-hosted **W**hats**A**pp **H**TTP **A**PI (REST API) that you can deploy on your own server and get running in just a few minutes, with support for **WEBJS**, **NOWEB**, and **GOWS**, plus extended media handling in **GOWS** for images, audio, video, documents, and richer attachment workflows.
 
 [![Docker Pulls](https://img.shields.io/docker/pulls/devlikeapro/waha)](https://hub.docker.com/r/devlikeapro/waha)
 
